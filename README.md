@@ -245,40 +245,6 @@ Performance Characteristics:
 • Concurrency: Supports multiple requests (CPU KV cache managed by vLLM)
 ```
 
-#### Data Flow Diagram
-
-```mermaid
-graph TB
-    User[User Browser] -->|HTTPS| Gateway[Data Science Gateway]
-    Gateway -->|OAuth| OAuth[OAuth Proxy Container]
-    OAuth -->|Port 8888| AnythingLLM[AnythingLLM Container]
-
-    AnythingLLM -->|Query| Embedder[Native Embedder]
-    Embedder -->|Embedding| VectorDB[(LanceDB)]
-    VectorDB -->|Context| RAG[RAG System]
-
-    RAG -->|HTTP POST| API[/v1/chat/completions]
-    API -->|Port 8080| Service[opt-125m-cpu-predictor Service]
-    Service -->|Route| vLLM[vLLM Container]
-
-    vLLM -->|Load| Template[Chat Template ConfigMap]
-    vLLM -->|Download| HF[HuggingFace: facebook/opt-125m]
-
-    vLLM -->|Process| Inference[CPU Inference Engine]
-    Inference -->|Response| vLLM
-    vLLM -->|JSON| Service
-    Service -->|Result| AnythingLLM
-
-    AnythingLLM -->|Display| OAuth
-    OAuth -->|HTTPS| User
-
-    style User fill:#e1f5ff
-    style AnythingLLM fill:#ffe1f5
-    style vLLM fill:#f5ffe1
-    style HF fill:#fff5e1
-```
-
-
 ## Requirements 
 
 
