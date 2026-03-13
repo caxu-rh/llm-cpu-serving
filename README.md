@@ -59,8 +59,9 @@ Red Hat uses Arcade software to create interactive demos. Check out
 │  │  │  │  AnythingLLM Workbench (StatefulSet)                       │  │  │   │
 │  │  │  │  Pod: anythingllm-0                                        │  │  │   │
 │  │  │  │  ┌──────────────────────────────────────────────────────┐  │  │  │   │
-│  │  │  │  │  Container: oauth-proxy                              │  │  │  │   │
-│  │  │  │  │  Port: 8443 (HTTPS with OAuth authentication)        │  │  │  │   │
+│  │  │  │  │  Container: kube-rbac-proxy (auto-injected)          │  │  │  │   │
+│  │  │  │  │  Port: 8443 (HTTPS with RBAC authentication)         │  │  │  │   │
+│  │  │  │  │  Note: Injected by OpenShift AI controller           │  │  │  │   │
 │  │  │  │  └───────────────────┬──────────────────────────────────┘  │  │  │   │
 │  │  │  │                      │                                      │  │  │   │
 │  │  │  │  ┌───────────────────▼──────────────────────────────────┐  │  │  │   │
@@ -92,8 +93,8 @@ Red Hat uses Arcade software to create interactive demos. Check out
 │  │  │  │  Volumes:                                                   │  │  │   │
 │  │  │  │  • PVC: anythingllm (persistent storage)                    │  │  │   │
 │  │  │  │  • ConfigMap: workbench-trusted-ca-bundle                   │  │  │   │
-│  │  │  │  • Secret: anythingllm-oauth-config                         │  │  │   │
-│  │  │  │  • Secret: anythingllm-tls                                  │  │  │   │
+│  │  │  │  • Secret: anythingllm-kube-rbac-proxy-tls (auto-created)   │  │  │   │
+│  │  │  │  • ConfigMap: anythingllm-kube-rbac-proxy-config (auto)     │  │  │   │
 │  │  │  └─────────────────────────────────────────────────────────────┘  │  │   │
 │  │  │                        │                                          │  │   │
 │  │  │                        │ HTTP POST /v1/chat/completions           │  │   │
@@ -165,25 +166,34 @@ Red Hat uses Arcade software to create interactive demos. Check out
 │  │  ┌──────────────────────────────────────────────────────────────────┐  │   │
 │  │  │  Supporting Resources                                            │  │   │
 │  │  │                                                                  │  │   │
-│  │  │  ConfigMaps:                                                     │  │   │
-│  │  │  • vllm-chat-template - Chat template for model                 │  │   │
-│  │  │  • workbench-trusted-ca-bundle - CA certificates                │  │   │
-│  │  │  • modelconfig-opt-125m-cpu-0 - Model configuration             │  │   │
+│  │  │  Helm-Managed Resources:                                         │  │   │
+│  │  │  ├── ConfigMaps:                                                 │  │   │
+│  │  │  │   • vllm-chat-template - Chat template for model             │  │   │
+│  │  │  │   • workbench-trusted-ca-bundle - CA certificates            │  │   │
+│  │  │  │   • modelconfig-opt-125m-cpu-0 - Model configuration         │  │   │
+│  │  │  ├── Secrets:                                                    │  │   │
+│  │  │  │   • opt-125m-vllm-cpu - AnythingLLM LLM provider config      │  │   │
+│  │  │  │   • anythingllm-api - API key for AnythingLLM                │  │   │
+│  │  │  ├── ServiceAccounts:                                            │  │   │
+│  │  │  │   • anythingllm - Identity for AnythingLLM pod               │  │   │
+│  │  │  ├── ServingRuntime:                                             │  │   │
+│  │  │  │   • vllm-cpu - Defines vLLM container spec                   │  │   │
+│  │  │  └── Jobs:                                                       │  │   │
+│  │  │      • anythingllm-seed - Pre-seeds workspace with documents    │  │   │
 │  │  │                                                                  │  │   │
-│  │  │  Secrets:                                                        │  │   │
-│  │  │  • opt-125m-vllm-cpu - AnythingLLM LLM provider config          │  │   │
-│  │  │  • anythingllm-api - API key for AnythingLLM                    │  │   │
-│  │  │  • anythingllm-oauth-config - OAuth cookie secret               │  │   │
-│  │  │  • anythingllm-tls - TLS certificates                           │  │   │
-│  │  │                                                                  │  │   │
-│  │  │  ServiceAccounts:                                                │  │   │
-│  │  │  • anythingllm - Identity for AnythingLLM pod                   │  │   │
-│  │  │                                                                  │  │   │
-│  │  │  ServingRuntime:                                                 │  │   │
-│  │  │  • vllm-cpu - Defines vLLM container spec and configuration     │  │   │
-│  │  │                                                                  │  │   │
-│  │  │  Jobs:                                                           │  │   │
-│  │  │  • anythingllm-seed - Pre-seeds workspace with documents        │  │   │
+│  │  │  Auto-Created by OpenShift AI Controller:                        │  │   │
+│  │  │  ├── Services (with ownerReferences):                            │  │   │
+│  │  │  │   • anythingllm - Port 80→8888 (main workbench)              │  │   │
+│  │  │  │   • anythingllm-kube-rbac-proxy - Port 8443 (auth proxy)     │  │   │
+│  │  │  ├── HTTPRoute (in redhat-ods-applications namespace):           │  │   │
+│  │  │  │   • nb-hr-assistant-anythingllm                              │  │   │
+│  │  │  │     Backend: anythingllm-kube-rbac-proxy:8443                │  │   │
+│  │  │  ├── ReferenceGrant:                                             │  │   │
+│  │  │  │   • notebook-httproute-access (cross-namespace access)       │  │   │
+│  │  │  ├── ConfigMaps:                                                 │  │   │
+│  │  │  │   • anythingllm-kube-rbac-proxy-config                       │  │   │
+│  │  │  └── Secrets:                                                    │  │   │
+│  │  │      • anythingllm-kube-rbac-proxy-tls (TLS certificates)       │  │   │
 │  │  └──────────────────────────────────────────────────────────────────┘  │   │
 │  └─────────────────────────────────────────────────────────────────────────┘   │
 │                                                                                 │
@@ -197,7 +207,7 @@ Request Flow:
 ═════════════
 
 1. User Request Flow:
-   User → Data Science Gateway → OAuth Proxy → AnythingLLM UI
+   User → Data Science Gateway → HTTPRoute → kube-rbac-proxy → AnythingLLM UI
 
 2. Chat Message Processing:
    a. User sends message in AnythingLLM
@@ -286,6 +296,100 @@ Example AWS machine that works well: [m6i.4xlarge](https://instances.vantage.sh/
 
 Follow the below steps to deploy and test the HR assistant.
 
+### Prerequisites
+
+Before deploying, ensure the following are available on your OpenShift cluster:
+
+#### 1. OpenShift AI Installed and Configured
+- Red Hat OpenShift AI 2.16.2 or later must be installed
+- Single-model serving platform components must be configured:
+  - Red Hat OpenShift Service Mesh
+  - Red Hat OpenShift Serverless (KServe)
+
+#### 2. Data Science Gateway
+- Verify the gateway exists:
+  ```bash
+  oc get gateway data-science-gateway -n openshift-ingress
+  ```
+  Expected output should show the gateway in `PROGRAMMED` state.
+
+#### 3. AnythingLLM ImageStream (REQUIRED)
+The workbench references an ImageStream that must exist in the `redhat-ods-applications` namespace:
+
+```bash
+# Check if ImageStream exists
+oc get imagestream custom-anythingllm -n redhat-ods-applications
+```
+
+**If the ImageStream does NOT exist**, create it before deploying:
+
+```bash
+cat <<EOF | oc apply -f -
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  name: custom-anythingllm
+  namespace: redhat-ods-applications
+  labels:
+    opendatahub.io/notebook-image: "true"
+spec:
+  lookupPolicy:
+    local: true
+  tags:
+    - name: "1.9.1"
+      from:
+        kind: DockerImage
+        name: quay.io/rh-aiservices-bu/anythingllm-workbench:1.9.1
+      importPolicy:
+        scheduled: true
+      referencePolicy:
+        type: Local
+EOF
+```
+
+**Note:** This ImageStream is required because the Notebook workbench references it, and OpenShift AI expects workbench images to be available as ImageStreams.
+
+#### 4. Storage Class
+Verify your cluster has a compatible storage class. The default in `helm/values.yaml` is:
+
+```yaml
+storageClassName: ocs-external-storagecluster-ceph-rbd
+```
+
+To use a different storage class, update `helm/values.yaml` before deploying:
+
+```bash
+# List available storage classes
+oc get storageclass
+
+# Update values.yaml if needed
+```
+
+Common storage class names:
+- OpenShift Container Storage: `ocs-external-storagecluster-ceph-rbd`
+- AWS EBS: `gp3-csi`, `gp2`
+- Azure Disk: `managed-premium`
+- GCP PD: `standard-rwo`
+
+### Portability Checklist
+
+When deploying to a new cluster, verify:
+
+- ✅ OpenShift AI is installed and Data Science Gateway is running
+- ✅ `custom-anythingllm` ImageStream exists in `redhat-ods-applications` namespace
+- ✅ Storage class in `helm/values.yaml` matches your cluster's available storage
+- ✅ Cluster has sufficient resources (8 CPU cores, 8Gi memory recommended)
+
+**Quick Verification:** Run the prerequisites check script:
+
+```bash
+./scripts/verify-prerequisites.sh
+```
+
+This script will verify all requirements and provide specific instructions if anything is missing.
+
+Follow the below steps to deploy and test the HR assistant.
+
 ### Clone
 
 ```bash
@@ -327,7 +431,7 @@ Wait until all pods are in `Running` or `Completed` status:
 ```
 (Expected output)
 NAME                                      READY   STATUS      RESTARTS   AGE
-anythingllm-0                             2/2     Running     0          2m
+anythingllm-0                             3/3     Running     0          2m
 anythingllm-seed-xxxxx                    0/1     Completed   0          2m
 opt-125m-cpu-predictor-xxxxxxxxxx-xxxxx   2/2     Running     0          2m
 ```
@@ -457,6 +561,98 @@ This deployment is designed to be flexible. To switch to a different model:
 - `facebook/opt-350m` (better quality, slower)
 - `facebook/opt-1.3b` (best quality, requires more resources)
 - `TinyLlama/TinyLlama-1.1B-Chat-v1.0` (original model)
+
+## Troubleshooting
+
+### Workbench shows "Notebook image deleted"
+
+**Cause:** The ImageStream `custom-anythingllm` doesn't exist in the `redhat-ods-applications` namespace.
+
+**Solution:**
+1. Check if ImageStream exists:
+   ```bash
+   oc get imagestream custom-anythingllm -n redhat-ods-applications
+   ```
+
+2. If missing, create it (see Prerequisites section above)
+
+3. Delete and recreate the Notebook to pick up the ImageStream:
+   ```bash
+   oc delete notebook anythingllm -n hr-assistant
+   # Wait for it to be recreated by Helm
+   ```
+
+### Workbench not accessible / "no healthy upstream"
+
+**Cause:** The kube-rbac-proxy container may not have started, or services aren't created.
+
+**Solution:**
+1. Check pod has 3 containers running:
+   ```bash
+   oc get pod anythingllm-0 -n hr-assistant
+   # Should show 3/3 Running
+   ```
+
+2. Check container names:
+   ```bash
+   oc get pod anythingllm-0 -n hr-assistant -o jsonpath='{.spec.containers[*].name}'
+   # Should show: anythingllm anythingllm-automation kube-rbac-proxy
+   ```
+
+3. Check services were auto-created:
+   ```bash
+   oc get svc -n hr-assistant
+   # Should show: anythingllm, anythingllm-kube-rbac-proxy
+   ```
+
+4. Check HTTPRoute backend:
+   ```bash
+   oc get httproute nb-hr-assistant-anythingllm -n redhat-ods-applications -o jsonpath='{.spec.rules[0].backendRefs[0]}'
+   # Should point to: anythingllm-kube-rbac-proxy:8443
+   ```
+
+### vLLM pod not starting / model download fails
+
+**Cause:** Network issues downloading from HuggingFace, or insufficient resources.
+
+**Solution:**
+1. Check pod logs:
+   ```bash
+   oc logs -n hr-assistant $(oc get pod -n hr-assistant -l app=isvc.opt-125m-cpu-predictor -o name) -c kserve-container
+   ```
+
+2. Verify network access to HuggingFace:
+   ```bash
+   oc debug -n hr-assistant $(oc get pod -n hr-assistant -l app=isvc.opt-125m-cpu-predictor -o name) -- curl -I https://huggingface.co
+   ```
+
+3. Check resource limits:
+   ```bash
+   oc describe pod -n hr-assistant $(oc get pod -n hr-assistant -l app=isvc.opt-125m-cpu-predictor -o name)
+   # Look for "Insufficient memory" or "Insufficient cpu" events
+   ```
+
+### Storage issues
+
+**Cause:** Storage class doesn't exist or PVC can't be provisioned.
+
+**Solution:**
+1. List available storage classes:
+   ```bash
+   oc get storageclass
+   ```
+
+2. Update `helm/values.yaml` with a valid storage class name
+
+3. Check PVC status:
+   ```bash
+   oc get pvc -n hr-assistant
+   ```
+
+4. If PVC is pending, check events:
+   ```bash
+   oc describe pvc anythingllm -n hr-assistant
+   ```
 
 ### References
 
