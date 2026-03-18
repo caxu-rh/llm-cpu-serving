@@ -6,8 +6,6 @@ metadata:
     openshift.io/description: ''
     openshift.io/display-name: AnythingLLM
   name: anythingllm
-  finalizers:
-    - kubernetes.io/pvc-protection
   labels:
     opendatahub.io/dashboard: 'true'
 spec:

@@ -56,8 +56,8 @@ images:
     tag: "1.9.1"
 
 model:
-  storageUri: "hf://facebook/opt-125m"
-  name: "opt-125m"
+  storageUri: "hf://Qwen/Qwen2.5-0.5B-Instruct"
+  name: "qwen25-05b"
   maxModelLen: 2048
 
 resources:
