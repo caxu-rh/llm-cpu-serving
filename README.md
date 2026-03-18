@@ -445,11 +445,11 @@ oc get route data-science-gateway -n openshift-ingress -o jsonpath='{.spec.host}
 
 Once inside the dashboard, navigate to **Data Science Projects** → **hr-assistant** (or whatever you named your `${PROJECT}`).
 
-OpenShift AI Projects
+![OpenShift AI Projects](docs/images/rhoai-1.png)
 
 Inside the project you can see Workbenches. Open the **AnythingLLM** workbench.
 
-OpenShift AI Projects
+![OpenShift AI Projects](docs/images/rhoai-2.png)
 
 Finally, click on the **Assistant to the HR Representative** Workspace that's pre-created for you and you can start chatting with your assistant! 🎉
 
