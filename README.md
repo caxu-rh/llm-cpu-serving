@@ -148,7 +148,22 @@ oc new-project ${PROJECT}
 
 ### Install with Helm
 
+**Standard deployment** (model downloaded from HuggingFace):
+
 ```bash
+helm install ${PROJECT} helm/ --namespace ${PROJECT}
+```
+
+**Deployment with model signing** (model verified before serving — see
+[Model Signing and Verification](#model-signing-and-verification-optional) for
+the full signing workflow):
+
+```bash
+# Ensure the Model Validation Operator is installed first
+oc get crd modelvalidations.ml.sigstore.dev
+
+# Install — the pre-install hooks download and stage the signed model,
+# then the operator injects a verification init container into the predictor pod
 helm install ${PROJECT} helm/ --namespace ${PROJECT}
 ```
 
@@ -158,7 +173,7 @@ helm install ${PROJECT} helm/ --namespace ${PROJECT}
 oc -n ${PROJECT} get pods -w
 ```
 
-Wait until all pods show `Running` or `Completed`:
+**Standard deployment** — wait until all pods show `Running` or `Completed`:
 
 ```
 NAME                                            READY   STATUS      RESTARTS   AGE
@@ -170,18 +185,24 @@ anythingllm-seed-xxxxx                          0/1     Completed   0          2
 > The predictor pod may take 30-60 seconds to become ready as it downloads the model
 > from HuggingFace on first start.
 
-When `signing.enabled: true`, you will also see:
+**With model signing enabled** — the predictor pod goes through an extra init phase:
 
 ```
 NAME                                            READY   STATUS      RESTARTS   AGE
-model-download-xxxxx                            0/1     Completed   0          2m
-<model-name>-cpu-predictor-xxxxxxxxx-xxxxx      2/2     Running     0          90s
+model-download-xxxxx                            0/1     Completed   0          30s    <-- pre-install hook
+anythingllm-0                                   3/3     Running     0          2m
+anythingllm-seed-xxxxx                          0/1     Completed   0          2m
+<model-name>-cpu-predictor-xxxxxxxxx-xxxxx      0/2     Init:0/1    0          30s    <-- verifying signature
+<model-name>-cpu-predictor-xxxxxxxxx-xxxxx      2/2     Running     0          90s    <-- verification passed
 ```
 
-The predictor pod will briefly show `Init:0/1` while the operator's model
-validation init container verifies the signature, then transition to `Running`.
+The `Init:0/1` phase is the Model Validation Operator's init container verifying
+the cryptographic signature. Once it passes, the pod transitions to `Running`.
+If verification fails, the pod stays in `Init:Error` and never serves traffic.
 
 ### Test
+
+#### Access the UI
 
 Get the OpenShift AI Dashboard URL:
 
@@ -199,13 +220,13 @@ Open the **AnythingLLM** workbench.
 
 Click on the **Assistant to the HR Representative** workspace and start chatting.
 
-#### Direct Access URL
+**Direct Access URL:**
 
 ```bash
 echo "https://$(oc get route data-science-gateway -n openshift-ingress -o jsonpath='{.spec.host}')/notebook/${PROJECT}/anythingllm/"
 ```
 
-#### Testing the API Directly
+#### Test the API directly
 
 ```bash
 MODEL_NAME=$(grep '^  name:' helm/values.yaml | awk '{print $2}' | tr -d '"')
@@ -215,7 +236,7 @@ POD=$(oc get pod -n ${PROJECT} -l app=isvc.${MODEL_NAME}-cpu-predictor -o jsonpa
 oc port-forward -n ${PROJECT} pod/${POD} 8080:8080
 
 # In another terminal, test the chat completions endpoint
-curl -X POST "http://localhost:8080/v1/chat/completions" \
+curl -s http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d "{
     \"model\": \"${MODEL_NAME}\",
@@ -223,8 +244,62 @@ curl -X POST "http://localhost:8080/v1/chat/completions" \
       {\"role\": \"user\", \"content\": \"What is HR compliance?\"}
     ],
     \"max_tokens\": 100
-  }"
+  }" | python3 -m json.tool
 ```
+
+Expected: a JSON response with `choices[0].message.content` containing the model's answer.
+
+#### Validate model signing (when signing.enabled)
+
+Run these checks after deploying with `signing.enabled: true` to confirm the
+full signing flow is working end-to-end:
+
+```bash
+PROJECT="hr-assistant"
+MODEL_NAME=$(grep '^  name:' helm/values.yaml | awk '{print $2}' | tr -d '"')
+
+# Step 1: Confirm the model-download Job completed
+echo "=== Step 1: model-download Job ==="
+oc get job model-download -n ${PROJECT}
+# Expected: COMPLETIONS = 1/1
+
+# Step 2: Verify the model + signature are on the PVC
+echo "=== Step 2: Model files on PVC ==="
+oc exec -n ${PROJECT} $(oc get pod -n ${PROJECT} -l app=isvc.${MODEL_NAME}-cpu-predictor \
+    -o jsonpath='{.items[0].metadata.name}') -c kserve-container -- ls -la /data/signed-model/model.sig
+# Expected: the model.sig file exists
+
+# Step 3: Confirm the operator injected the init container
+echo "=== Step 3: Init container injected ==="
+oc get pod -n ${PROJECT} -l serving.kserve.io/inferenceservice \
+    -o jsonpath='{range .items[*]}{.spec.initContainers[*].name}{"\n"}{end}'
+# Expected: model-validation
+
+# Step 4: Check verification succeeded
+echo "=== Step 4: Verification result ==="
+oc logs -n ${PROJECT} -l serving.kserve.io/inferenceservice -c model-validation
+# Expected: "Verification succeeded"
+
+# Step 5: Confirm model is loaded from PVC (not HuggingFace)
+echo "=== Step 5: Model source ==="
+oc logs -n ${PROJECT} -l serving.kserve.io/inferenceservice -c kserve-container | head -5
+# Expected: model path shows /data/signed-model
+
+# Step 6: Test inference through the verified model
+echo "=== Step 6: Inference test ==="
+oc exec -n ${PROJECT} anythingllm-0 -c anythingllm -- \
+    curl -s http://${MODEL_NAME}-cpu-predictor:8080/v1/chat/completions \
+    -H 'Content-Type: application/json' \
+    -d "{\"model\":\"${MODEL_NAME}\",\"messages\":[{\"role\":\"user\",\"content\":\"Hello\"}],\"max_tokens\":30}"
+# Expected: JSON response with choices[0].message.content
+```
+
+All 6 steps passing confirms: the signed model was downloaded, the operator
+injected the verification init container, the signature was verified, and the
+model is serving traffic through the verified path.
+
+> For a detailed validation report with full command output, see
+> [VALIDATION-REPORT.md](VALIDATION-REPORT.md).
 
 ### Delete
 
@@ -361,8 +436,56 @@ podman build --platform linux/amd64 -t quay.io/yourorg/signed-model:v1 .
 podman push quay.io/yourorg/signed-model:v1
 ```
 
-> The helper script `./scripts/sign-model.sh` wraps the sign, verify, and archive
-> steps. Run `./scripts/sign-model.sh` without arguments for usage.
+> The helper script `./scripts/sign-model.sh` wraps the keygen, sign, verify, and
+> archive steps. Run `./scripts/sign-model.sh help` for usage.
+
+### End-to-End Deployment with Signing
+
+This walkthrough covers the complete flow from signing to verified deployment:
+
+```bash
+PROJECT="hr-assistant"
+
+# --- One-time setup ---
+
+# 1. Install the Model Validation Operator (if not already installed)
+oc apply -k https://github.com/sigstore/model-validation-operator/config/overlays/olm
+oc wait --for=condition=Available deployment/model-validation-controller-manager \
+    -n model-validation-operator-system --timeout=120s
+
+# 2. Sign a model (see "Quick Start — Sign a Model" above for details)
+#    Assumes you have a signed OCI image at quay.io/yourorg/signed-model:v1
+#    and the public key in signing-key.pub
+
+# --- Deploy ---
+
+# 3. Update helm/values.yaml with your signing config:
+#    signing.enabled: true
+#    signing.modelImage: "quay.io/yourorg/signed-model:v1"
+#    signing.publicKeyData: <contents of signing-key.pub>
+
+# 4. Create project and deploy
+oc new-project ${PROJECT}
+helm install ${PROJECT} helm/ --namespace ${PROJECT}
+
+# 5. Watch the deployment
+oc get pods -n ${PROJECT} -w
+# Wait for model-download to Complete, then predictor pod to go from
+# Init:0/1 → Running (this is the verification happening)
+
+# --- Validate ---
+
+# 6. Confirm the signature was verified
+oc logs -n ${PROJECT} -l serving.kserve.io/inferenceservice -c model-validation
+# Should print: "Verification succeeded"
+
+# 7. Test inference
+MODEL_NAME=$(grep '^  name:' helm/values.yaml | awk '{print $2}' | tr -d '"')
+oc exec -n ${PROJECT} anythingllm-0 -c anythingllm -- \
+    curl -s http://${MODEL_NAME}-cpu-predictor:8080/v1/chat/completions \
+    -H 'Content-Type: application/json' \
+    -d "{\"model\":\"${MODEL_NAME}\",\"messages\":[{\"role\":\"user\",\"content\":\"Hello\"}],\"max_tokens\":30}"
+```
 
 ### Enable in values.yaml
 
@@ -422,37 +545,8 @@ On `helm install`:
 
 ### Testing Model Validation
 
-After deploying with `signing.enabled: true`:
-
-```bash
-PROJECT="hr-assistant"
-
-# 1. Check the model-download Job completed
-oc logs -n ${PROJECT} job/model-download
-
-# 2. Check the operator injected the init container
-oc get pods -n ${PROJECT} -l serving.kserve.io/inferenceservice -o jsonpath='{.items[0].spec.initContainers[*].name}'
-# Expected: model-validation
-
-# 3. Check the init container verification succeeded
-oc logs -n ${PROJECT} -l serving.kserve.io/inferenceservice -c model-validation
-# Expected: "Verification succeeded"
-
-# 4. Check the operator logs
-oc logs -n model-validation-operator-system deployment/model-validation-controller-manager --tail=20
-
-# 5. Verify the model is loaded from the PVC (not HuggingFace)
-MODEL_NAME=$(grep '^  name:' helm/values.yaml | awk '{print $2}' | tr -d '"')
-oc exec -n ${PROJECT} $(oc get pod -n ${PROJECT} -l app=isvc.${MODEL_NAME}-cpu-predictor -o jsonpath='{.items[0].metadata.name}') \
-    -c kserve-container -- curl -s http://localhost:8080/v1/models | python3 -m json.tool
-# root should show "/data/signed-model"
-
-# 6. Test inference
-oc exec -n ${PROJECT} anythingllm-0 -c anythingllm -- \
-    curl -s http://${MODEL_NAME}-cpu-predictor:8080/v1/chat/completions \
-    -H 'Content-Type: application/json' \
-    -d "{\"model\":\"${MODEL_NAME}\",\"messages\":[{\"role\":\"user\",\"content\":\"Hello\"}],\"max_tokens\":30}"
-```
+See [Validate model signing](#validate-model-signing-when-signingenabled) in the
+Deploy section for the full 6-step validation procedure with expected outputs.
 
 ### What Happens on Verification Failure
 
