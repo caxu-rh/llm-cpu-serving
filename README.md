@@ -1,6 +1,6 @@
 # Serve a lightweight HR assistant
 
-chat-example.png
+![chat-example.png](docs/images/chat-example.png)
 
 Replace hours spent searching policy documents with higher-value relational work.
 
