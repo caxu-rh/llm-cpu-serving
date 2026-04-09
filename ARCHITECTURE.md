@@ -4,257 +4,224 @@ This document describes the detailed component architecture of the HR Assistant 
 All resource names containing a model identifier (shown as `<model.name>` below) are derived
 from the `model.name` field in [`helm/values.yaml`](helm/values.yaml).
 
-## Detailed Component Architecture
+## High-Level Overview
 
+```mermaid
+graph TB
+    User([User]) --> Gateway[Data Science Gateway]
+
+    subgraph cluster["OpenShift AI Cluster"]
+        Gateway --> RBAC[kube-rbac-proxy<br/>auto-injected]
+
+        subgraph ns["Namespace: hr-assistant"]
+            subgraph workbench["AnythingLLM Workbench (StatefulSet)"]
+                RBAC --> ALM[AnythingLLM<br/>Port 8888]
+                ALM --> Sidecar[anythingllm-automation<br/>SQLite / API key setup]
+            end
+
+            ALM -->|POST /v1/chat/completions| Service
+
+            subgraph inference["Inference Service Layer"]
+                Service["Service: model-cpu-predictor<br/>Headless ClusterIP: None<br/>Port 80 → 8080"]
+                Service --> Pod
+
+                subgraph Pod["Predictor Pod"]
+                    Init["InitContainer: model-validation<br/>Verifies model signature"]
+                    Init -->|pass| Agent[Container: agent<br/>KServe Agent]
+                    Agent --> VLLM["Container: kserve-container<br/>vLLM (CPU, float32)<br/>Port 8080"]
+                end
+            end
+
+            subgraph signing["Model Signing Resources"]
+                PVC[(PVC: model-storage<br/>Signed model files)]
+                MVR[ModelValidation CR<br/>ml.sigstore.dev/v1alpha1]
+                PubKey[Secret: model-signing-pubkey<br/>EC P-256 public key]
+            end
+
+            PVC -->|/data/signed-model| Init
+            PubKey -->|/keys/signing-key.pub| Init
+            MVR --> Operator
+            PVC --> VLLM
+        end
+
+        subgraph operator-ns["Namespace: model-validation-operator-system"]
+            Operator[Model Validation Operator<br/>MutatingWebhookConfiguration]
+        end
+
+        Operator -->|injects init container| Pod
+    end
+
+    subgraph external["External Dependencies"]
+        OSM[OpenShift Service Mesh]
+        KServe[OpenShift Serverless / KServe]
+    end
+
+    style signing fill:#e8f5e9,stroke:#2e7d32
+    style operator-ns fill:#fff3e0,stroke:#e65100
+    style workbench fill:#e3f2fd,stroke:#1565c0
+    style inference fill:#fce4ec,stroke:#c62828
 ```
-┌─────────────────────────────────────────────────────────────────────────────────┐
-│                          OpenShift AI / OpenShift Cluster                       │
-│                                                                                 │
-│  ┌─────────────────────────────────────────────────────────────────────────┐    │
-│  │                    Namespace: hr-assistant                              │    │
-│  │                                                                         │    │
-│  │  ┌──────────────────────────────────────────────────────────────────┐   │    │
-│  │  │  User Interface Layer                                            │   │    │
-│  │  │  ┌────────────────────────────────────────────────────────────┐  │   │    │
-│  │  │  │  Data Science Gateway (OpenShift Route)                    │  │   │    │
-│  │  │  │  https://data-science-gateway.apps.../hr-assistant/...     │  │   │    │
-│  │  │  └─────────────────────┬──────────────────────────────────────┘  │   │    │
-│  │  │                        │                                         │   │    │
-│  │  │                        ▼                                         │   │    │
-│  │  │  ┌────────────────────────────────────────────────────────────┐  │   │    │
-│  │  │  │  AnythingLLM Workbench (StatefulSet)                       │  │   │    │
-│  │  │  │  Pod: anythingllm-0                                        │  │   │    │
-│  │  │  │  ┌──────────────────────────────────────────────────────┐  │  │   │    │
-│  │  │  │  │  Container: kube-rbac-proxy (auto-injected)          │  │  │   │    │
-│  │  │  │  │  Port: 8443 (HTTPS with RBAC authentication)         │  │  │   │    │
-│  │  │  │  │  Note: Injected by OpenShift AI controller           │  │  │   │    │
-│  │  │  │  └───────────────────┬──────────────────────────────────┘  │  │   │    │
-│  │  │  │                      │                                     │  │   │    │
-│  │  │  │  ┌───────────────────▼──────────────────────────────────┐  │  │   │    │
-│  │  │  │  │  Container: anythingllm                              │  │  │   │    │
-│  │  │  │  │  Port: 8888 (Jupyter/AnythingLLM interface)          │  │  │   │    │
-│  │  │  │  │                                                      │  │  │   │    │
-│  │  │  │  │  Features:                                           │  │  │   │    │
-│  │  │  │  │  • Chat interface for end users                      │  │  │   │    │
-│  │  │  │  │  • Document embedding (native embedder)              │  │  │   │    │
-│  │  │  │  │  • Vector database (LanceDB)                         │  │  │   │    │
-│  │  │  │  │  • RAG (Retrieval-Augmented Generation)              │  │  │   │    │
-│  │  │  │  │  • Workspace: "Assistant to the HR Representative"   │  │  │   │    │
-│  │  │  │  │                                                      │  │  │   │    │
-│  │  │  │  │  Environment (from Secret: <model.name>-vllm-cpu):   │  │  │   │    │
-│  │  │  │  │  • LLM_PROVIDER: generic-openai                      │  │  │   │    │
-│  │  │  │  │  • GENERIC_OPEN_AI_BASE_PATH:                        │  │  │   │    │
-│  │  │  │  │      http://<model.name>-cpu-predictor:8080/v1       │  │  │   │    │
-│  │  │  │  │  • GENERIC_OPEN_AI_MODEL_PREF: <model.name>          │  │  │   │    │
-│  │  │  │  │  • EMBEDDING_ENGINE: native                          │  │  │   │    │
-│  │  │  │  │  • VECTOR_DB: lancedb                                │  │  │   │    │
-│  │  │  │  └───────────────────┬──────────────────────────────────┘  │  │   │    │
-│  │  │  │                      │                                     │  │   │    │
-│  │  │  │  ┌───────────────────▼──────────────────────────────────┐  │  │   │    │
-│  │  │  │  │  Container: anythingllm-automation (sidecar)         │  │  │   │    │
-│  │  │  │  │  • SQLite database management                        │  │  │   │    │
-│  │  │  │  │  • API key setup automation                          │  │  │   │    │
-│  │  │  │  └──────────────────────────────────────────────────────┘  │  │   │    │
-│  │  │  │                                                            │  │   │    │
-│  │  │  │  Volumes:                                                  │  │   │    │
-│  │  │  │  • PVC: anythingllm (persistent storage)                   │  │   │    │
-│  │  │  │  • ConfigMap: workbench-trusted-ca-bundle                  │  │   │    │
-│  │  │  │  • Secret: anythingllm-kube-rbac-proxy-tls (auto-created)  │  │   │    │
-│  │  │  │  • ConfigMap: anythingllm-kube-rbac-proxy-config (auto)    │  │   │    │
-│  │  │  └────────────────────────────────────────────────────────────┘  │   │    │
-│  │  │                        │                                         │   │    │
-│  │  │                        │ HTTP POST /v1/chat/completions          │   │    │
-│  │  │                        │ (OpenAI-compatible API calls)           │   │    │
-│  │  │                        │                                         │   │    │
-│  │  └────────────────────────┼─────────────────────────────────────────┘   │    │
-│  │                           │                                             │    │
-│  │                           ▼                                             │    │
-│  │  ┌──────────────────────────────────────────────────────────────────┐   │    │
-│  │  │  Inference Service Layer                                         │   │    │
-│  │  │  ┌────────────────────────────────────────────────────────────┐  │   │    │
-│  │  │  │  Service: <model.name>-cpu-predictor                       │  │   │    │
-│  │  │  │  Type: Headless (ClusterIP: None)                          │  │   │    │
-│  │  │  │  Port: 80 → Target: 8080                                   │  │   │    │
-│  │  │  └─────────────────────┬──────────────────────────────────────┘  │   │    │
-│  │  │                        │                                         │   │    │
-│  │  │                        ▼                                         │   │    │
-│  │  │  ┌────────────────────────────────────────────────────────────┐  │   │    │
-│  │  │  │  InferenceService: <model.name>-cpu (KServe)               │  │   │    │
-│  │  │  │  Deployment Mode: RawDeployment                            │  │   │    │
-│  │  │  │  Runtime: vllm-cpu (ServingRuntime)                        │  │   │    │
-│  │  │  │                                                            │  │   │    │
-│  │  │  │  Pod: <model.name>-cpu-predictor-xxxxxxxxx-xxxxx           │  │   │    │
-│  │  │  │  ┌──────────────────────────────────────────────────────┐  │  │   │    │
-│  │  │  │  │  Container: agent (KServe Agent)                     │  │  │   │    │
-│  │  │  │  │  • Model loading and lifecycle management            │  │  │   │    │
-│  │  │  │  │  • Health checks and monitoring                      │  │  │   │    │
-│  │  │  │  └───────────────────┬──────────────────────────────────┘  │  │   │    │
-│  │  │  │                      │                                     │  │   │    │
-│  │  │  │  ┌───────────────────▼──────────────────────────────────┐  │  │   │    │
-│  │  │  │  │  Container: kserve-container (vLLM)                  │  │  │   │    │
-│  │  │  │  │  Port: 8080 (HTTP)                                   │  │  │   │    │
-│  │  │  │  │                                                      │  │  │   │    │
-│  │  │  │  │  vLLM Server Configuration:                          │  │  │   │    │
-│  │  │  │  │  • Model: from model.storageUri in values.yaml       │  │  │   │    │
-│  │  │  │  │  • Dtype: float32 (CPU optimized)                    │  │  │   │    │
-│  │  │  │  │  • Max model length: from model.maxModelLen          │  │  │   │    │
-│  │  │  │  │  • Served model name: <model.name>                   │  │  │   │    │
-│  │  │  │  │                                                      │  │  │   │    │
-│  │  │  │  │  Environment Variables:                              │  │  │   │    │
-│  │  │  │  │  • VLLM_CPU_DISABLE_AVX512=1                         │  │  │   │    │
-│  │  │  │  │  • ONEDNN_VERBOSE=0                                  │  │  │   │    │
-│  │  │  │  │                                                      │  │  │   │    │
-│  │  │  │  │  API Endpoints:                                      │  │  │   │    │
-│  │  │  │  │  • GET  /health                                      │  │  │   │    │
-│  │  │  │  │  • GET  /v1/models                                   │  │  │   │    │
-│  │  │  │  │  • POST /v1/chat/completions ← (Primary)             │  │  │   │    │
-│  │  │  │  │  • POST /v1/completions                              │  │  │   │    │
-│  │  │  │  │  • POST /v1/embeddings                               │  │  │   │    │
-│  │  │  │  │                                                      │  │  │   │    │
-│  │  │  │  │  Resources (from values.yaml):                       │  │  │   │    │
-│  │  │  │  │  • Requests: 2 CPU, 4Gi memory                       │  │  │   │    │
-│  │  │  │  │  • Limits: 8 CPU, 8Gi memory                         │  │  │   │    │
-│  │  │  │  └───────────────────┬──────────────────────────────────┘  │  │   │    │
-│  │  │  │                      │                                     │  │   │    │
-│  │  │  │                      ▼                                     │  │   │    │
-│  │  │  │  ┌──────────────────────────────────────────────────────┐  │  │   │    │
-│  │  │  └────────────────────────────────────────────────────────────┘  │   │    │
-│  │  └──────────────────────────────────────────────────────────────────┘   │    │
-│  │                                                                         │    │
-│  │  ┌──────────────────────────────────────────────────────────────────┐   │    │
-│  │  │  Supporting Resources                                            │   │    │
-│  │  │                                                                  │   │    │
-│  │  │  Helm-Managed Resources:                                         │   │    │
-│  │  │  ├── ConfigMaps:                                                 │   │    │
-│  │  │  │   • workbench-trusted-ca-bundle - CA certificates             │   │    │
-│  │  │  │   • modelconfig-<model.name>-cpu-0 - Model configuration      │   │    │
-│  │  │  ├── Secrets:                                                    │   │    │
-│  │  │  │   • <model.name>-vllm-cpu - AnythingLLM LLM provider config   │   │    │
-│  │  │  │   • anythingllm-api - API key for AnythingLLM                 │   │    │
-│  │  │  ├── ServiceAccounts:                                            │   │    │
-│  │  │  │   • anythingllm - Identity for AnythingLLM pod                │   │    │
-│  │  │  ├── ServingRuntime:                                             │   │    │
-│  │  │  │   • vllm-cpu - Defines vLLM container spec                    │   │    │
-│  │  │  └── Jobs:                                                       │   │    │
-│  │  │      • anythingllm-seed - Pre-seeds workspace with documents     │   │    │
-│  │  │                                                                  │   │    │
-│  │  │  Auto-Created by OpenShift AI Controller:                        │   │    │
-│  │  │  ├── Services (with ownerReferences):                            │   │    │
-│  │  │  │   • anythingllm - Port 80→8888 (main workbench)               │   │    │
-│  │  │  │   • anythingllm-kube-rbac-proxy - Port 8443 (auth proxy)      │   │    │
-│  │  │  ├── HTTPRoute (in redhat-ods-applications namespace):           │   │    │
-│  │  │  │   • nb-hr-assistant-anythingllm                               │   │    │
-│  │  │  │     Backend: anythingllm-kube-rbac-proxy:8443                 │   │    │
-│  │  │  ├── ReferenceGrant:                                             │   │    │
-│  │  │  │   • notebook-httproute-access (cross-namespace access)        │   │    │
-│  │  │  ├── ConfigMaps:                                                 │   │    │
-│  │  │  │   • anythingllm-kube-rbac-proxy-config                        │   │    │
-│  │  │  └── Secrets:                                                    │   │    │
-│  │  │      • anythingllm-kube-rbac-proxy-tls (TLS certificates)        │   │    │
-│  │  └──────────────────────────────────────────────────────────────────┘   │    │
-│  └─────────────────────────────────────────────────────────────────────────┘    │
-│                                                                                 │
-│  External Dependencies:                                                         │
-│  • HuggingFace Hub: Model download (per model.storageUri)                       │
-│  • Red Hat OpenShift Service Mesh: Networking and routing                       │
-│  • Red Hat OpenShift Serverless (KServe): Model serving platform                │
-│  • Model Validation Operator (model signature verification)                     │
-│                                                                                 │
-└─────────────────────────────────────────────────────────────────────────────────┘
+
+## Deployment Flow
+
+```mermaid
+sequenceDiagram
+    participant Dev as Developer
+    participant Helm
+    participant PVC as model-storage PVC
+    participant Job as model-download Job
+    participant MVO as Model Validation Operator
+    participant Pod as Predictor Pod
+    participant vLLM
+
+    Dev->>Helm: helm install hr-assistant helm/
+    Note over Helm: Pre-install hooks (ordered by weight)
+
+    Helm->>PVC: Create PVC (hook-weight: -10)
+    Helm->>Job: Create model-download Job (hook-weight: -5)
+    Job->>PVC: Copy signed model + model.sig from OCI image
+
+    Note over Helm: Main resources
+    Helm->>Helm: Create ModelValidation CR
+    Helm->>Helm: Create signing-pubkey Secret
+    Helm->>Helm: Create ServingRuntime + InferenceService
+
+    Note over MVO: Webhook intercepts pod creation
+    MVO->>MVO: Detect validation.ml.sigstore.dev/ml label
+    MVO->>MVO: Read ModelValidation CR
+    MVO->>Pod: Inject model-validation init container
+
+    Note over Pod: Init container runs
+    Pod->>Pod: Read public key from /keys/signing-key.pub
+    Pod->>Pod: Read model from /data/signed-model
+    Pod->>Pod: Verify signature (model.sig)
+
+    alt Verification passes
+        Pod->>vLLM: Start kserve-container
+        vLLM->>vLLM: Load model from /data/signed-model
+        vLLM-->>Dev: Ready to serve (2/2 Running)
+    else Verification fails
+        Pod-->>Dev: Pod stays in Init:Error
+    end
 ```
 
 ## Request Flow
 
-1. **User Request Flow:**
-   User → Data Science Gateway → HTTPRoute → kube-rbac-proxy → AnythingLLM UI
+```mermaid
+sequenceDiagram
+    participant User
+    participant GW as Data Science Gateway
+    participant RBAC as kube-rbac-proxy
+    participant ALM as AnythingLLM
+    participant LDB as LanceDB
+    participant vLLM as vLLM (CPU)
 
-2. **Chat Message Processing:**
-   1. User sends message in AnythingLLM
-   2. AnythingLLM embeds the query (native embedder)
-   3. AnythingLLM searches vector DB (LanceDB) for relevant context
-   4. AnythingLLM constructs chat completion request with context
+    User->>GW: Chat message
+    GW->>RBAC: Route via HTTPRoute
+    RBAC->>ALM: Authenticated request
 
-3. **Inference Request:**
+    ALM->>ALM: Embed query (native embedder)
+    ALM->>LDB: Search for relevant context
+    LDB-->>ALM: Matching document chunks
 
-   ```
-   AnythingLLM → POST http://<model.name>-cpu-predictor:8080/v1/chat/completions
+    ALM->>vLLM: POST /v1/chat/completions<br/>{model, messages + context, max_tokens}
+    Note over vLLM: CPU inference (float32)<br/>~2-3 tokens/second
+    vLLM-->>ALM: Generated response
 
-   Request Body:
-   {
-     "model": "<model.name>",
-     "messages": [
-       {"role": "system", "content": "System prompt with HR context..."},
-       {"role": "user", "content": "User question..."}
-     ],
-     "max_tokens": 512,
-     "temperature": 0.7
-   }
-   ```
-
-4. **vLLM Processing:**
-   1. Receives request at `/v1/chat/completions` endpoint
-   2. Applies chat template to convert messages to prompt
-   3. Tokenizes prompt
-   4. Runs inference on CPU (float32 dtype)
-   5. Generates tokens autoregressively
-   6. Returns streaming or complete response
-
-5. **Response Path:**
-   vLLM → `<model.name>-cpu-predictor` Service → AnythingLLM → User Interface
-
-## Model Signing and Verification Flow
-
-The chart integrates with the
-[Model Validation Operator](https://github.com/sigstore/model-validation-operator)
-to enforce cryptographic model verification before the predictor pod serves traffic.
-
+    ALM-->>User: Answer with source citations
 ```
-┌──────────────────────────────────────────────────────────────────────────┐
-│  Model Signing and Verification Flow                                     │
-│                                                                          │
-│  Pre-install Hooks (Helm):                                               │
-│  ┌────────────────────────────┐   ┌──────────────────────────────────┐  │
-│  │ PVC: model-storage         │   │ Job: model-download              │  │
-│  │ (hook-weight: -10)         │──▶│ Copies signed model from OCI     │  │
-│  │ Persistent storage for     │   │ image to PVC at /data/signed-model│  │
-│  │ verified model files       │   │ (hook-weight: -5)                │  │
-│  └────────────────────────────┘   └──────────────────────────────────┘  │
-│                                                                          │
-│  Runtime Resources (Helm):                                               │
-│  ┌────────────────────────────┐   ┌──────────────────────────────────┐  │
-│  │ ModelValidation CR         │   │ Secret: model-signing-pubkey     │  │
-│  │ (ml.sigstore.dev/v1alpha1) │   │ PEM-encoded public key for      │  │
-│  │ Configures verification    │   │ key-based verification           │  │
-│  │ method + model path        │   │ (optional — for key-based mode)  │  │
-│  └────────────┬───────────────┘   └──────────────────────────────────┘  │
-│               │                                                          │
-│               ▼                                                          │
-│  ┌──────────────────────────────────────────────────────────────────┐   │
-│  │  Model Validation Operator (cluster-scoped)                      │   │
-│  │  Namespace: model-validation-operator-system                     │   │
-│  │                                                                  │   │
-│  │  MutatingWebhookConfiguration:                                   │   │
-│  │  • Watches pods with label: validation.ml.sigstore.dev/ml        │   │
-│  │  • Reads ModelValidation CR to get verification config           │   │
-│  │  • Injects model-validation init container into predictor pod    │   │
-│  └──────────────────────────────────────────────────────────────────┘   │
-│               │                                                          │
-│               ▼                                                          │
-│  ┌──────────────────────────────────────────────────────────────────┐   │
-│  │  Predictor Pod (with injected init container)                    │   │
-│  │                                                                  │   │
-│  │  InitContainer: model-validation                                 │   │
-│  │  ├── Reads public key from /keys/signing-key.pub                 │   │
-│  │  ├── Reads model from /data/signed-model                         │   │
-│  │  ├── Reads signature from /data/signed-model/model.sig           │   │
-│  │  └── If verification FAILS → pod stays in Init:Error             │   │
-│  │       If verification PASSES → pod proceeds to start             │   │
-│  │                                                                  │   │
-│  │  Container: kserve-container (vLLM)                              │   │
-│  │  └── Loads verified model from /data/signed-model                │   │
-│  └──────────────────────────────────────────────────────────────────┘   │
-└──────────────────────────────────────────────────────────────────────────┘
+
+## Model Signing and Verification
+
+```mermaid
+graph LR
+    subgraph sign["Developer Workstation"]
+        Model[Model Files] --> Sign["model_signing sign<br/>(EC P-256 private key)"]
+        Sign --> Sig[model.sig]
+        Model --> OCI[OCI Image]
+        Sig --> OCI
+    end
+
+    OCI -->|push to registry| Registry[(Container Registry<br/>e.g. quay.io)]
+
+    Registry -->|model-download Job| PVC[(PVC: model-storage)]
+
+    subgraph verify["Predictor Pod (Init)"]
+        PVC --> Agent[model-validation<br/>init container]
+        Key[Public Key<br/>from Secret] --> Agent
+        Agent -->|signature valid| Pass[✓ Pod starts<br/>vLLM serves model]
+        Agent -->|signature invalid| Fail[✗ Init:Error<br/>Model never served]
+    end
+
+    style sign fill:#e3f2fd,stroke:#1565c0
+    style verify fill:#e8f5e9,stroke:#2e7d32
+    style Fail fill:#ffcdd2,stroke:#c62828
+    style Pass fill:#c8e6c9,stroke:#2e7d32
 ```
+
+## Component Details
+
+### AnythingLLM Workbench
+
+| Property | Value |
+|---|---|
+| Type | StatefulSet (Pod: `anythingllm-0`) |
+| Containers | `kube-rbac-proxy` (auto-injected), `anythingllm`, `anythingllm-automation` |
+| Port | 8888 (AnythingLLM), 8443 (RBAC proxy) |
+| Features | Chat UI, RAG, document embedding (native), LanceDB vector store |
+| LLM Provider | `generic-openai` → `http://<model.name>-cpu-predictor:8080/v1` |
+| Volumes | PVC `anythingllm`, CA bundle ConfigMap, auto-created TLS Secret |
+
+### Predictor Pod
+
+| Property | Value |
+|---|---|
+| Type | Deployment via KServe InferenceService (RawDeployment mode) |
+| Init Container | `model-validation` — injected by Model Validation Operator |
+| Containers | `agent` (KServe Agent), `kserve-container` (vLLM) |
+| Port | 8080 (HTTP) |
+| Model source | `/data/signed-model` (from PVC, cryptographically verified) |
+| vLLM config | `--dtype float32`, `VLLM_CPU_DISABLE_AVX512=1`, `ONEDNN_VERBOSE=0` |
+| API endpoints | `GET /health`, `GET /v1/models`, `POST /v1/chat/completions`, `POST /v1/completions` |
+| Resources | Requests: 2 CPU / 4Gi — Limits: 8 CPU / 8Gi |
+
+### Model Validation Operator
+
+| Property | Value |
+|---|---|
+| Namespace | `model-validation-operator-system` |
+| Scope | Cluster-scoped (MutatingWebhookConfiguration) |
+| Trigger | Pods with label `validation.ml.sigstore.dev/ml` |
+| CRD | `ModelValidation` (`ml.sigstore.dev/v1alpha1`) |
+| Action | Injects `model-validation` init container with verification agent |
+| On pass | Init container exits 0, pod proceeds to start main containers |
+| On fail | Init container exits non-zero, pod stays in `Init:Error` |
+
+### Helm-Managed Resources
+
+| Resource | Purpose |
+|---|---|
+| `PVC/model-storage` | Stores the signed model (pre-install hook) |
+| `Job/model-download` | Copies model from OCI image to PVC (pre-install hook) |
+| `ModelValidation/<name>-validation` | Configures signature verification |
+| `Secret/model-signing-pubkey` | PEM-encoded public key for verification |
+| `InferenceService/<name>-cpu` | KServe predictor with validation label |
+| `ServingRuntime/vllm-cpu` | vLLM container spec with PVC mounts |
+| `Secret/<name>-vllm-cpu` | AnythingLLM LLM provider config |
+| `Secret/anythingllm-api` | API key for AnythingLLM |
+| `ServiceAccount/anythingllm` | Identity for AnythingLLM pod |
+| `Job/anythingllm-seed` | Pre-seeds workspace with documents |
+
+### Auto-Created by OpenShift AI Controller
+
+| Resource | Purpose |
+|---|---|
+| `Service/anythingllm` | Port 80→8888 (main workbench) |
+| `Service/anythingllm-kube-rbac-proxy` | Port 8443 (auth proxy) |
+| `HTTPRoute/nb-hr-assistant-anythingllm` | Routes traffic from Data Science Gateway |
+| `ReferenceGrant/notebook-httproute-access` | Cross-namespace access |
+| `ConfigMap/anythingllm-kube-rbac-proxy-config` | RBAC proxy configuration |
+| `Secret/anythingllm-kube-rbac-proxy-tls` | TLS certificates |
 
 ## Performance Characteristics
 
